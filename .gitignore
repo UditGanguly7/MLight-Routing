@@ -19,9 +19,9 @@ data/processed/
 data/training/
 
 # Models (regenerate with training)
-models/*.pth
-models/*.pkl
-models/*.h5
+*.pkl
+*.pth
+*.h5
 
 # Results
 results/figures/*.png
