@@ -31,7 +31,7 @@ class TemporalPNTModel(nn.Module):
 
     def __init__(
         self,
-        input_size: int = 7,
+        input_size: int = 6,  
         hidden_size_1: int = 64,
         hidden_size_2: int = 32,
         dense_size: int = 32,
@@ -85,7 +85,7 @@ class TemporalPNT:
 
     def __init__(
         self,
-        input_size: int = 7,
+        input_size: int = 6,
         device: str = "cpu",
         learning_rate: float = 1e-3,
     ):

@@ -1,15 +1,5 @@
 """
 Temporal training data generator for PNT estimation.
-
-Generates satellite pass sequences (90 s) instead of single snapshots.
-The evolution of Doppler/delay/SNR/elevation over time uniquely
-identifies device position -- resolving the ambiguity of single-snapshot PNT.
-
-Feature sequence (T=90, F=4):
-    [doppler_hz, delay_ms, snr_db, elevation_deg] at each time step
-
-Target (2,):
-    [lat_deg, lon_deg]
 """
 
 import numpy as np
@@ -19,17 +9,10 @@ from pathlib import Path
 from ..simulation import constants as C
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+PASS_DURATION_S = 480.0
+PASS_TIME_STEP_S = 4.0
+PASS_NUM_STEPS = int(PASS_DURATION_S / PASS_TIME_STEP_S)
 
-PASS_DURATION_S = 480.0        # 8 min — real LEO visibility window
-PASS_TIME_STEP_S = 4.0         # 4 s steps → 120 timesteps
-PASS_NUM_STEPS = int(PASS_DURATION_S / PASS_TIME_STEP_S)   # 120
-
-# ============================================================
-# RANDOM DEVICE POSITION
-# ============================================================
 
 def random_device_position(
     lat_range_deg: Tuple[float, float] = (-60.0, 60.0),
@@ -50,26 +33,11 @@ def random_device_position(
     return float(lat), float(lon), np.array([x, y, z])
 
 
-# ============================================================
-# SATELLITE PASS GENERATOR
-# ============================================================
-
 def random_satellite_pass(
     device_lat_deg: float,
     device_lon_deg: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Simulate a satellite pass near the device.
-
-    The satellite travels along a great-circle ground track that is
-    offset perpendicular to the device by 0-300 km. Arc length equals
-    satellite velocity × pass duration (physically consistent).
-
-    Returns:
-        sat_positions: (T, 3) ECEF positions [km]
-        sat_velocities: (T, 3) ECEF velocities [km/s]
-        t_array: (T,) time stamps [s]
-    """
+    """Simulate a satellite pass near the device."""
     lat_rad = np.deg2rad(device_lat_deg)
     lon_rad = np.deg2rad(device_lon_deg)
 
@@ -79,27 +47,19 @@ def random_satellite_pass(
         np.sin(lat_rad),
     ])
 
-    # Local horizontal frame at device
     up = device_pos / np.linalg.norm(device_pos)
     east = np.array([-np.sin(lon_rad), np.cos(lon_rad), 0.0])
     north = np.cross(up, east)
 
-    # Ground track offset (0-300 km). Small values → near-overhead passes.
-    offset_km = np.random.uniform(0.0, 800.0)    # wider range
+    offset_km = np.random.uniform(0.0, 800.0)
     track_azim_rad = np.deg2rad(np.random.uniform(0.0, 360.0))
 
     track_dir = np.cos(track_azim_rad) * north + np.sin(track_azim_rad) * east
     perp_dir = -np.sin(track_azim_rad) * north + np.cos(track_azim_rad) * east
 
-    # Closest approach point (ground track passes here at midpoint)
     closest_pt = device_pos + offset_km * perp_dir
     closest_pt = closest_pt / np.linalg.norm(closest_pt) * C.EARTH_RADIUS_KM
 
-    # Physical arc length: velocity × time
-    arc_total_km = C.SATELLITE_VELOCITY_KM_S * PASS_DURATION_S   # 7.6 × 480 = 3650 km
-    arc_half_km = arc_total_km / 2.0
-
-    # Rotation axis: perpendicular to (closest_pt × track_dir)
     axis = np.cross(closest_pt, track_dir)
     axis_norm = np.linalg.norm(axis)
     if axis_norm < 1e-6:
@@ -110,19 +70,6 @@ def random_satellite_pass(
             axis_norm = 1.0
     axis = axis / axis_norm
 
-    # Ensure axis direction so that motion is "forward" (toward device first)
-    # Test: rotate closest_pt by +small angle; check if it moves toward device
-    test_angle = 0.01  # radians
-    test_pt = (
-        closest_pt * np.cos(-test_angle)
-        + np.cross(axis, closest_pt) * np.sin(-test_angle)
-        + axis * np.dot(axis, closest_pt) * (1 - np.cos(-test_angle))
-    )
-    # If dot(test_pt - closest_pt, device_pos - closest_pt) < 0, we're moving away → flip axis
-    if np.dot(test_pt - closest_pt, device_pos - closest_pt) < 0:
-        axis = -axis
-
-    # Angular rate on sphere
     omega_rad_s = C.SATELLITE_VELOCITY_KM_S / C.EARTH_RADIUS_KM
 
     t_array = np.arange(0, PASS_DURATION_S, PASS_TIME_STEP_S)
@@ -133,12 +80,9 @@ def random_satellite_pass(
     sat_velocities = np.zeros((T, 3))
 
     for i, t in enumerate(t_array):
-        # Rotation angle: at t = mid, satellite is at closest_pt.
-        # At t < mid, satellite is "before" closest_pt (approaching).
         dt = t - t_mid
         theta = omega_rad_s * dt
 
-        # Rodrigues rotation of closest_pt around axis
         cos_t = np.cos(theta)
         sin_t = np.sin(theta)
 
@@ -147,12 +91,10 @@ def random_satellite_pass(
             + np.cross(axis, closest_pt) * sin_t
             + axis * np.dot(axis, closest_pt) * (1 - cos_t)
         )
-        # Reproject to sphere
         ground_pt = ground_pt / np.linalg.norm(ground_pt) * C.EARTH_RADIUS_KM
 
         sat_positions[i] = ground_pt / C.EARTH_RADIUS_KM * C.SEMI_MAJOR_AXIS_KM
 
-        # Instantaneous tangential velocity (perpendicular to position, along arc)
         tangent = np.cross(axis, ground_pt)
         tangent_norm = np.linalg.norm(tangent)
         if tangent_norm < 1e-6:
@@ -163,16 +105,12 @@ def random_satellite_pass(
     return sat_positions, sat_velocities, t_array
 
 
-# ============================================================
-# OBSERVABLES
-# ============================================================
-
 def compute_observables_at_time(
     device_pos_ecef: np.ndarray,
     sat_pos_ecef: np.ndarray,
     sat_vel_ecef: np.ndarray,
 ) -> Dict[str, float]:
-    """Compute Doppler, delay, SNR, elevation at one time instant."""
+    """Doppler, delay, SNR, elevation for satellite-to-device link."""
     delta = sat_pos_ecef - device_pos_ecef
     dist_km = np.linalg.norm(delta)
 
@@ -204,80 +142,80 @@ def compute_observables_at_time(
     }
 
 
-# ============================================================
-# SAMPLE / DATASET
-# ============================================================
+def generate_temporal_sample() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Generate one satellite pass.
 
-def generate_temporal_sample() -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Generate one satellite pass with satellite reference position.
-
-    Feature sequence (T, 7):
-        [sat_x_ref, sat_y_ref, sat_z_ref,   ← satellite ECEF position at t=0
-         doppler_hz, delay_ms, snr_db, elevation_deg]
-    Target (2,):
-        [lat_deg, lon_deg]
+    Returns:
+        sequence: (T, 6) — [sat_lat_0, sat_lon_0, doppler, delay, snr, elev]
+        target:   (2,) — [delta_lat, delta_lon]
+        reference:(2,) — [sat_lat_0, sat_lon_0]
     """
     lat, lon, device_pos = random_device_position()
     sat_positions, sat_velocities, _ = random_satellite_pass(lat, lon)
 
     T = sat_positions.shape[0]
-    sequence = np.zeros((T, 7))
+    sequence = np.zeros((T, 6))
 
-    # Reference satellite position (at t=0) — same for every timestep
     sat_ref = sat_positions[0]
+    r_sat = np.linalg.norm(sat_ref)
+    sat_lat_0 = np.rad2deg(np.arcsin(sat_ref[2] / r_sat))
+    sat_lon_0 = np.rad2deg(np.arctan2(sat_ref[1], sat_ref[0]))
 
     for i in range(T):
         obs = compute_observables_at_time(
             device_pos, sat_positions[i], sat_velocities[i]
         )
-        sequence[i, 0] = sat_ref[0]
-        sequence[i, 1] = sat_ref[1]
-        sequence[i, 2] = sat_ref[2]
-        sequence[i, 3] = obs['doppler_hz']
-        sequence[i, 4] = obs['delay_ms']
-        sequence[i, 5] = obs['snr_db']
-        sequence[i, 6] = obs['elevation_deg']
+        sequence[i, 0] = sat_lat_0
+        sequence[i, 1] = sat_lon_0
+        sequence[i, 2] = obs['doppler_hz']
+        sequence[i, 3] = obs['delay_ms']
+        sequence[i, 4] = obs['snr_db']
+        sequence[i, 5] = obs['elevation_deg']
 
-    target = np.array([lat, lon], dtype=np.float64)
-    return sequence, target
+    delta_lat = lat - sat_lat_0
+    delta_lon = ((lon - sat_lon_0 + 180.0) % 360.0) - 180.0
+
+    target = np.array([delta_lat, delta_lon], dtype=np.float64)
+    reference = np.array([sat_lat_0, sat_lon_0], dtype=np.float64)
+
+    return sequence, target, reference
+
 
 def generate_temporal_dataset(
     n_samples: int = 5000,
     seed: int = 42,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Generate temporal dataset.
-
-    Returns:
-        X: (n_samples, T, 4)
-        y: (n_samples, 2)
-    """
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Generate dataset. Returns X=(N,T,6), y=(N,2), R=(N,2)."""
     rng_state = np.random.get_state()
     np.random.seed(seed)
 
-    X = np.zeros((n_samples, PASS_NUM_STEPS, 7))
+    X = np.zeros((n_samples, PASS_NUM_STEPS, 6))
     y = np.zeros((n_samples, 2))
+    R = np.zeros((n_samples, 2))
 
     for i in range(n_samples):
-        X[i], y[i] = generate_temporal_sample()
+        X[i], y[i], R[i] = generate_temporal_sample()
 
     np.random.set_state(rng_state)
-    return X, y
+    return X, y, R
 
 
-def save_temporal_dataset(X, y, out_dir: str = "data/training") -> None:
-    """Save dataset."""
+def save_temporal_dataset(X, y, R, out_dir: str = "data/training") -> None:
+    """Save dataset to disk."""
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     np.save(out_path / "pnt_temporal_X.npy", X)
     np.save(out_path / "pnt_temporal_y.npy", y)
+    np.save(out_path / "pnt_temporal_R.npy", R)
     print(f"Saved: {out_path / 'pnt_temporal_X.npy'}  (shape: {X.shape})")
     print(f"Saved: {out_path / 'pnt_temporal_y.npy'}  (shape: {y.shape})")
+    print(f"Saved: {out_path / 'pnt_temporal_R.npy'}  (shape: {R.shape})")
 
 
 def load_temporal_dataset(in_dir: str = "data/training"):
-    """Load dataset."""
+    """Load dataset from disk."""
     in_path = Path(in_dir)
     X = np.load(in_path / "pnt_temporal_X.npy")
     y = np.load(in_path / "pnt_temporal_y.npy")
-    return X, y
+    R = np.load(in_path / "pnt_temporal_R.npy")
+    return X, y, R
