@@ -21,7 +21,9 @@ data/training/
 # Models (regenerate with training)
 *.pkl
 *.pth
+*.pt
 *.h5
+*.npy
 
 # Results
 results/figures/*.png
