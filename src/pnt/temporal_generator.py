@@ -143,34 +143,76 @@ def compute_observables_at_time(
 
 
 def generate_temporal_sample() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Generate one satellite pass.
+    """
+    Generate one satellite pass.
 
-    Returns:
-        sequence: (T, 6) — [sat_lat_0, sat_lon_0, doppler, delay, snr, elev]
-        target:   (2,) — [delta_lat, delta_lon]
-        reference:(2,) — [sat_lat_0, sat_lon_0]
+    Features per timestep (T, 8):
+        0: sat_lat_0        (satellite subpoint latitude at t=0)
+        1: sat_lon_0        (satellite subpoint longitude at t=0)
+        2: doppler_hz       (instantaneous Doppler)
+        3: delay_ms         (instantaneous delay)
+        4: snr_db           (instantaneous SNR)
+        5: elevation_deg    (instantaneous elevation)
+        6: azimuth_deg      (instantaneous azimuth to satellite)
+        7: elevation_rate   (d(elevation)/dt — geometry indicator)
     """
     lat, lon, device_pos = random_device_position()
     sat_positions, sat_velocities, _ = random_satellite_pass(lat, lon)
 
     T = sat_positions.shape[0]
-    sequence = np.zeros((T, 6))
+    sequence = np.zeros((T, 8))
 
     sat_ref = sat_positions[0]
     r_sat = np.linalg.norm(sat_ref)
     sat_lat_0 = np.rad2deg(np.arcsin(sat_ref[2] / r_sat))
     sat_lon_0 = np.rad2deg(np.arctan2(sat_ref[1], sat_ref[0]))
 
+    # First pass: compute observables and azimuth
+    elevations = np.zeros(T)
+    azimuths = np.zeros(T)
+    dopplers = np.zeros(T)
+    delays = np.zeros(T)
+    snrs = np.zeros(T)
+
     for i in range(T):
         obs = compute_observables_at_time(
             device_pos, sat_positions[i], sat_velocities[i]
         )
+        dopplers[i] = obs['doppler_hz']
+        delays[i] = obs['delay_ms']
+        snrs[i] = obs['snr_db']
+        elevations[i] = obs['elevation_deg']
+
+        # Azimuth from device to satellite (local frame)
+        delta = sat_positions[i] - device_pos
+        delta_norm = delta / np.linalg.norm(delta)
+
+        lat_rad = np.deg2rad(lat)
+        lon_rad = np.deg2rad(lon)
+        up = np.array([
+            np.cos(lat_rad) * np.cos(lon_rad),
+            np.cos(lat_rad) * np.sin(lon_rad),
+            np.sin(lat_rad),
+        ])
+        east = np.array([-np.sin(lon_rad), np.cos(lon_rad), 0.0])
+        north = np.cross(up, east)
+
+        az = np.arctan2(np.dot(delta_norm, east), np.dot(delta_norm, north))
+        azimuths[i] = np.rad2deg(az) % 360.0
+
+    # Elevation rate (finite difference)
+    elev_rate = np.gradient(elevations, PASS_TIME_STEP_S)
+
+    # Assemble sequence
+    for i in range(T):
         sequence[i, 0] = sat_lat_0
         sequence[i, 1] = sat_lon_0
-        sequence[i, 2] = obs['doppler_hz']
-        sequence[i, 3] = obs['delay_ms']
-        sequence[i, 4] = obs['snr_db']
-        sequence[i, 5] = obs['elevation_deg']
+        sequence[i, 2] = dopplers[i]
+        sequence[i, 3] = delays[i]
+        sequence[i, 4] = snrs[i]
+        sequence[i, 5] = elevations[i]
+        sequence[i, 6] = azimuths[i]
+        sequence[i, 7] = elev_rate[i]
 
     delta_lat = lat - sat_lat_0
     delta_lon = ((lon - sat_lon_0 + 180.0) % 360.0) - 180.0
@@ -189,7 +231,7 @@ def generate_temporal_dataset(
     rng_state = np.random.get_state()
     np.random.seed(seed)
 
-    X = np.zeros((n_samples, PASS_NUM_STEPS, 6))
+    X = np.zeros((n_samples, PASS_NUM_STEPS, 8))
     y = np.zeros((n_samples, 2))
     R = np.zeros((n_samples, 2))
 
