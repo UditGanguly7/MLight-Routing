@@ -25,7 +25,7 @@ import random
 class QNetwork(nn.Module):
     """Small MLP for Q-value estimation with action masking."""
 
-    def __init__(self, obs_dim: int = 21, action_dim: int = 6, hidden: int = 64):
+    def __init__(self, obs_dim: int = 35, action_dim: int = 6, hidden: int = 64):
         super().__init__()
         self.fc1 = nn.Linear(obs_dim, hidden)
         self.fc2 = nn.Linear(hidden, hidden)
@@ -87,7 +87,7 @@ class DQNAgent:
 
     def __init__(
         self,
-        obs_dim: int = 21,
+        obs_dim: int = 35,
         action_dim: int = 6,
         lr: float = 1e-3,
         gamma: float = 0.95,
