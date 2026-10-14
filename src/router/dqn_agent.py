@@ -1,11 +1,11 @@
 """
 Lightweight DQN agent for MLight-Routing.
 
-Supports action masking (invalid next-hops masked out during both
-action selection and Q-value updates).
+Supports action masking (invalid next-hops masked out during action selection
+and Q-value updates). Handles edge case where all actions are invalid.
 
 Architecture:
-    Input(21) -> Linear(64) -> ReLU -> Linear(64) -> ReLU -> Linear(6)
+    Input(obs_dim) -> Linear(64) -> ReLU -> Linear(64) -> ReLU -> Linear(action_dim)
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 from collections import deque
 import random
 
@@ -25,7 +25,7 @@ import random
 class QNetwork(nn.Module):
     """Small MLP for Q-value estimation with action masking."""
 
-    def __init__(self, obs_dim: int = 35, action_dim: int = 6, hidden: int = 64):
+    def __init__(self, obs_dim: int = 46, action_dim: int = 6, hidden: int = 64):
         super().__init__()
         self.fc1 = nn.Linear(obs_dim, hidden)
         self.fc2 = nn.Linear(hidden, hidden)
@@ -48,7 +48,9 @@ class ReplayBuffer:
         self.buffer = deque(maxlen=capacity)
 
     def push(self, state, action, reward, next_state, done, action_mask, next_mask):
-        self.buffer.append((state, action, reward, next_state, done, action_mask, next_mask))
+        self.buffer.append(
+            (state, action, reward, next_state, done, action_mask, next_mask)
+        )
 
     def sample(self, batch_size: int):
         batch = random.sample(self.buffer, batch_size)
@@ -73,30 +75,26 @@ class ReplayBuffer:
 
 class DQNAgent:
     """
-    DQN agent with action masking.
+    DQN agent with action masking and safe target computation.
 
-    Args:
-        obs_dim: observation dimension
-        action_dim: number of discrete actions
-        lr: learning rate
-        gamma: discount factor
-        buffer_capacity: replay buffer size
-        batch_size: training batch size
-        target_update: how often to sync target network
+    Key bug fix: when all actions in a next-state are invalid,
+    the max over Q-values must not be -1e9 (which would explode
+    the squared loss). We use -100 as the mask value and zero out
+    the target when no valid actions exist.
     """
 
     def __init__(
         self,
-        obs_dim: int = 35,
+        obs_dim: int = 46,
         action_dim: int = 6,
-        lr: float = 1e-3,
+        lr: float = 3e-4,
         gamma: float = 0.95,
-        buffer_capacity: int = 50000,
+        buffer_capacity: int = 100000,
         batch_size: int = 64,
         target_update: int = 500,
         epsilon_start: float = 1.0,
         epsilon_end: float = 0.05,
-        epsilon_decay_steps: int = 20000,
+        epsilon_decay_steps: int = 30000,
         device: str = "cpu",
     ):
         self.obs_dim = obs_dim
@@ -106,19 +104,16 @@ class DQNAgent:
         self.target_update = target_update
         self.device = torch.device(device)
 
-        # Networks
         self.q_net = QNetwork(obs_dim, action_dim).to(self.device)
         self.target_net = QNetwork(obs_dim, action_dim).to(self.device)
         self.target_net.load_state_dict(self.q_net.state_dict())
         self.target_net.eval()
 
         self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=lr)
-        self.loss_fn = nn.SmoothL1Loss()  # Huber loss, robust to outliers
+        self.loss_fn = nn.SmoothL1Loss()
 
-        # Replay
         self.replay_buffer = ReplayBuffer(capacity=buffer_capacity)
 
-        # Exploration
         self.epsilon_start = epsilon_start
         self.epsilon_end = epsilon_end
         self.epsilon_decay_steps = epsilon_decay_steps
@@ -126,7 +121,6 @@ class DQNAgent:
 
     @property
     def epsilon(self) -> float:
-        """Current epsilon (linear decay)."""
         frac = min(self.total_steps / self.epsilon_decay_steps, 1.0)
         return self.epsilon_start + frac * (self.epsilon_end - self.epsilon_start)
 
@@ -134,29 +128,25 @@ class DQNAgent:
     # ACTION SELECTION
     # --------------------------------------------------------
 
-    def select_action(self, state: np.ndarray, action_mask: np.ndarray, greedy: bool = False) -> int:
-        """
-        Choose action using epsilon-greedy with masking.
-
-        Args:
-            state: observation vector
-            action_mask: boolean array of valid actions
-            greedy: if True, always pick argmax (for evaluation)
-        """
+    def select_action(
+        self,
+        state: np.ndarray,
+        action_mask: np.ndarray,
+        greedy: bool = False,
+    ) -> int:
         valid_indices = np.where(action_mask)[0]
         if len(valid_indices) == 0:
-            return 0  # fallback (shouldn't happen)
+            return 0
 
-        # Exploration
         if not greedy and random.random() < self.epsilon:
             return int(np.random.choice(valid_indices))
 
-        # Exploitation
         with torch.no_grad():
-            state_t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+            state_t = torch.tensor(
+                state, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
             q_values = self.q_net(state_t).squeeze(0).cpu().numpy()
 
-        # Mask invalid actions
         q_values[~action_mask] = -np.inf
         return int(np.argmax(q_values))
 
@@ -175,14 +165,19 @@ class DQNAgent:
     # --------------------------------------------------------
 
     def train_step(self) -> Optional[float]:
-        """One gradient update. Returns loss, or None if buffer too small."""
         if len(self.replay_buffer) < self.batch_size:
             return None
 
-        states, actions, rewards, next_states, dones, masks, next_masks = \
-            self.replay_buffer.sample(self.batch_size)
+        (
+            states,
+            actions,
+            rewards,
+            next_states,
+            dones,
+            masks,
+            next_masks,
+        ) = self.replay_buffer.sample(self.batch_size)
 
-        # Convert to tensors
         states_t = torch.tensor(states, device=self.device)
         actions_t = torch.tensor(actions, device=self.device)
         rewards_t = torch.tensor(rewards, device=self.device)
@@ -194,20 +189,36 @@ class DQNAgent:
         q_values = self.q_net(states_t)
         q_selected = q_values.gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
-        # Target Q-values with action masking on next state
+        # Target computation with safe masking
         with torch.no_grad():
             next_q = self.target_net(next_states_t)
-            next_q[~next_masks_t] = -1e9  # large negative for invalid
+
+            # Mask invalid actions with a moderate value
+            next_q[~next_masks_t] = -100.0
+
+            # Max over actions
             max_next_q = next_q.max(dim=1).values
+
+            # If a state has no valid actions at all, use 0 as target
+            has_valid = next_masks_t.any(dim=1)
+            max_next_q = torch.where(
+                has_valid,
+                max_next_q,
+                torch.zeros_like(max_next_q),
+            )
+
             target_q = rewards_t + (1.0 - dones_t) * self.gamma * max_next_q
+
+        # Clip targets to reasonable range
+        target_q = torch.clamp(target_q, -100.0, 100.0)
 
         # Loss
         loss = self.loss_fn(q_selected, target_q)
 
-        # Backward
+        # Backward with gradient clipping
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), 10.0)
+        torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), 1.0)
         self.optimizer.step()
 
         # Sync target network
