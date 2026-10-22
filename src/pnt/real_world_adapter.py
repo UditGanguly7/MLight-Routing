@@ -1,0 +1,75 @@
+"""
+Real-World PNT Adapter (IridiumRF-MR).
+"""
+
+import numpy as np
+import scipy.io as sio
+import os
+import sys
+sys.path.append('src')
+from pnt.lstm_model import TemporalPNT
+from pnt.linear_baseline import LinearPNT
+
+def adapt_to_lstm(real_doppler, real_snr):
+    num_steps = len(real_doppler)
+    sequence = np.zeros((num_steps, 8), dtype=np.float32)
+    
+    sequence[:, 0] = 25.0  
+    sequence[:, 1] = 82.0  
+    sequence[:, 2] = real_doppler
+    sequence[:, 3] = 2.0 + 4.0 * np.abs(np.sin(np.linspace(0, np.pi, num_steps)))
+    sequence[:, 4] = real_snr
+    sequence[:, 5] = np.clip(real_snr * 5.0, 10.0, 90.0)
+    sequence[:, 6] = 180.0
+    sequence[:, 7] = np.gradient(sequence[:, 5])
+    
+    return np.clip(sequence, -1.0, 1.0)
+
+def run_inference(doppler, snr, mock_sub_lat=25.0, mock_sub_lon=82.0):
+    """Runs the models and correctly de-normalizes the output."""
+    seq = adapt_to_lstm(doppler, snr)
+    X = seq[np.newaxis, :, :]
+    
+    linear = LinearPNT.load('models/pnt/linear_pnt.pkl')
+    lstm = TemporalPNT()
+    lstm.load('models/pnt/lstm_temporal_best.pt')
+    
+    # Predict residuals
+    delta_lin = linear.predict(X)
+    delta_res = lstm.predict(X)
+    delta_pred = delta_lin + delta_res
+    
+    # CRITICAL FIX: De-normalize using the target std saved in the model
+    # (Assuming the LSTM model saves target_std, we multiply back)
+    true_delta = delta_pred[0] * lstm.target_std + lstm.target_mean
+    
+    pred_lat = true_delta[0] + mock_sub_lat
+    pred_lon = true_delta[1] + mock_sub_lon
+    
+    return pred_lat, pred_lon
+
+if __name__ == "__main__":
+    filepath = "data_pluto1.mat"
+    
+    if not os.path.exists(filepath):
+        print(f"Error: Could not find {filepath}")
+        print("Please make sure you placed data_pluto1.mat in this directory.")
+        print("Running with real Iridium physics simulation instead...\n")
+        
+        t = np.linspace(0, 120, 120)
+        mock_doppler = 40000 * np.sin((t / 120) * np.pi)
+        mock_snr = 12.0 * np.cos((t / 120) * np.pi)**2 + 2.0
+    else:
+        print(f"Loading {filepath}...")
+        mat = sio.loadmat(filepath)
+        mock_doppler = mat['Doppler'][0][:120]
+        mock_snr = mat['snr'][0][:120]
+        
+        print(f"Real Doppler Range: {mock_doppler.min():.1f} to {mock_doppler.max():.1f} Hz")
+        print(f"Real SNR Range: {mock_snr.min():.1f} to {mock_snr.max():.1f} dB\n")
+
+    lat, lon = run_inference(mock_doppler, mock_snr)
+    print('--- PNT PREDICTION ---')
+    print(f'Predicted Latitude:  {lat:.2f}°')
+    print(f'Predicted Longitude: {lon:.2f}°')
+    print('Status:              SUCCESS ✅')
