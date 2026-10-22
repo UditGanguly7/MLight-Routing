@@ -33,14 +33,16 @@ def run_inference(doppler, snr, mock_sub_lat=25.0, mock_sub_lon=82.0):
     lstm = TemporalPNT()
     lstm.load('models/pnt/lstm_temporal_best.pt')
     
-    # Use the built-in predict method which handles all normalization!
     delta_lin = linear.predict(X)
     delta_res = lstm.predict(X)
     delta_pred = delta_lin + delta_res
     
-    # Since delta_pred is already in degrees, just add the subpoint
-    pred_lat = delta_pred[0, 0] + mock_sub_lat
-    pred_lon = delta_pred[0, 1] + mock_sub_lon
+    # FIX: Clip to physical limits of a delta (max +/- 20 degrees)
+    delta_lat = np.clip(delta_pred[0, 0], -20.0, 20.0)
+    delta_lon = np.clip(delta_pred[0, 1], -20.0, 20.0)
+    
+    pred_lat = delta_lat + mock_sub_lat
+    pred_lon = delta_lon + mock_sub_lon
     
     return pred_lat, pred_lon
 
