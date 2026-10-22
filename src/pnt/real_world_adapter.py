@@ -26,7 +26,6 @@ def adapt_to_lstm(real_doppler, real_snr):
     return np.clip(sequence, -1.0, 1.0)
 
 def run_inference(doppler, snr, mock_sub_lat=25.0, mock_sub_lon=82.0):
-    """Runs the models and correctly de-normalizes the output."""
     seq = adapt_to_lstm(doppler, snr)
     X = seq[np.newaxis, :, :]
     
@@ -34,17 +33,14 @@ def run_inference(doppler, snr, mock_sub_lat=25.0, mock_sub_lon=82.0):
     lstm = TemporalPNT()
     lstm.load('models/pnt/lstm_temporal_best.pt')
     
-    # Predict residuals
+    # Use the built-in predict method which handles all normalization!
     delta_lin = linear.predict(X)
     delta_res = lstm.predict(X)
     delta_pred = delta_lin + delta_res
     
-    # CRITICAL FIX: De-normalize using the target std saved in the model
-    # (Assuming the LSTM model saves target_std, we multiply back)
-    true_delta = delta_pred[0] * lstm.target_std + lstm.target_mean
-    
-    pred_lat = true_delta[0] + mock_sub_lat
-    pred_lon = true_delta[1] + mock_sub_lon
+    # Since delta_pred is already in degrees, just add the subpoint
+    pred_lat = delta_pred[0, 0] + mock_sub_lat
+    pred_lon = delta_pred[0, 1] + mock_sub_lon
     
     return pred_lat, pred_lon
 
@@ -53,7 +49,6 @@ if __name__ == "__main__":
     
     if not os.path.exists(filepath):
         print(f"Error: Could not find {filepath}")
-        print("Please make sure you placed data_pluto1.mat in this directory.")
         print("Running with real Iridium physics simulation instead...\n")
         
         t = np.linspace(0, 120, 120)
