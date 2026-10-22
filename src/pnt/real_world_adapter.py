@@ -4,6 +4,7 @@ Real-World PNT Adapter (IridiumRF-MR).
 
 import numpy as np
 import scipy.io as sio
+import h5py
 import os
 import sys
 sys.path.append('src')
@@ -37,7 +38,7 @@ def run_inference(doppler, snr, mock_sub_lat=25.0, mock_sub_lon=82.0):
     delta_res = lstm.predict(X)
     delta_pred = delta_lin + delta_res
     
-    # FIX: Clip to physical limits of a delta (max +/- 20 degrees)
+    # Clip to physical limits of a delta (max +/- 20 degrees)
     delta_lat = np.clip(delta_pred[0, 0], -20.0, 20.0)
     delta_lon = np.clip(delta_pred[0, 1], -20.0, 20.0)
     
@@ -58,9 +59,18 @@ if __name__ == "__main__":
         mock_snr = 12.0 * np.cos((t / 120) * np.pi)**2 + 2.0
     else:
         print(f"Loading {filepath}...")
-        mat = sio.loadmat(filepath)
-        mock_doppler = mat['Doppler'][0][:120]
-        mock_snr = mat['snr'][0][:120]
+        try:
+            # Try standard scipy first
+            mat = sio.loadmat(filepath)
+            mock_doppler = mat['Doppler'][0][:120]
+            mock_snr = mat['snr'][0][:120]
+        except NotImplementedError:
+            # Fallback to h5py for MATLAB v7.3 files
+            print("Detected MATLAB v7.3 format. Using HDF5 reader...")
+            with h5py.File(filepath, 'r') as f:
+                # h5py reads transposed, so we flatten and take the first 120
+                mock_doppler = f['Doppler'][:].flatten()[:120]
+                mock_snr = f['snr'][:].flatten()[:120]
         
         print(f"Real Doppler Range: {mock_doppler.min():.1f} to {mock_doppler.max():.1f} Hz")
         print(f"Real SNR Range: {mock_snr.min():.1f} to {mock_snr.max():.1f} dB\n")
